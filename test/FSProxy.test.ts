@@ -1,76 +1,21 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { Readable, Writable } from 'node:stream'
+import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { FSProxy } from '../src/index.ts'
+import { closed, sink, source, useTempDir } from './helpers.ts'
 
-let dir: string
-
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'fs-proxy-test-'))
-})
-
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true })
-})
-
-/** Emits `data` in chunks of the given sizes (cycled), as fast as it is pulled. */
-function source(data: Buffer, sizes: number[] = [64 * 1024]) {
-  let offset = 0
-  let i = 0
-  return new Readable({
-    read() {
-      if (offset >= data.length) return this.push(null)
-      const size = sizes[i++ % sizes.length] as number
-      this.push(data.subarray(offset, offset + size))
-      offset += size
-    },
-  })
-}
-
-/** A consumer that records what it gets and can be paused. */
-function sink() {
-  const chunks: Buffer[] = []
-  let release: (() => void) | null = null
-  let paused: Promise<void> | null = null
-
-  const stream = new Writable({
-    highWaterMark: 1,
-    write(chunk: Buffer, _encoding, done) {
-      chunks.push(chunk)
-      if (paused) paused.then(() => done())
-      else done()
-    },
-  })
-
-  return {
-    stream,
-    chunks,
-    get received() {
-      return Buffer.concat(chunks)
-    },
-    pause() {
-      paused = new Promise((resolve) => {
-        release = resolve
-      })
-    },
-    resume() {
-      paused = null
-      release?.()
-    },
-  }
-}
+const tmp = useTempDir()
 
 describe('FSProxy', () => {
   it('passes data through unchanged', async () => {
     const data = randomBytes(5 * 1024 * 1024)
     const out = sink()
 
-    await pipeline(source(data, [1, 7000, 65536, 300000]), new FSProxy({ dir }), out.stream)
+    await pipeline(source(data, [1, 7000, 65536, 300000]), new FSProxy({ dir: tmp.path }), out.stream)
 
     expect(out.received.equals(data)).toBe(true)
   })
@@ -78,7 +23,7 @@ describe('FSProxy', () => {
   it('accepts the whole source while the consumer is stalled, then replays it in bounded chunks', async () => {
     const data = randomBytes(8 * 1024 * 1024)
     const chunkSize = 32 * 1024
-    const proxy = new FSProxy({ dir, chunkSize })
+    const proxy = new FSProxy({ dir: tmp.path, chunkSize })
     const out = sink()
     out.pause()
 
@@ -100,23 +45,23 @@ describe('FSProxy', () => {
   })
 
   it('removes the cache file once the stream finishes', async () => {
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     out.pause()
     const done = pipeline(source(randomBytes(1024 * 1024)), proxy, out.stream)
     await new Promise((resolve) => proxy.on('finish', resolve))
 
-    expect(await readdir(dir)).toHaveLength(1)
+    expect(await readdir(tmp.path)).toHaveLength(1)
     out.resume()
     await done
-    await new Promise((resolve) => proxy.on('close', resolve))
+    await closed(proxy)
 
     expect(existsSync(proxy.filepath as string)).toBe(false)
-    expect(await readdir(dir)).toEqual([])
+    expect(await readdir(tmp.path)).toEqual([])
   })
 
   it('removes the cache file when the source errors', async () => {
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     out.pause()
     let sent = 0
@@ -128,14 +73,14 @@ describe('FSProxy', () => {
     })
 
     await expect(pipeline(failing, proxy, out.stream)).rejects.toThrow('socket reset')
-    await new Promise((resolve) => (proxy.closed ? resolve(null) : proxy.on('close', resolve)))
+    await closed(proxy)
 
-    expect(await readdir(dir)).toEqual([])
+    expect(await readdir(tmp.path)).toEqual([])
   })
 
   it('removes the cache file when aborted', async () => {
     const controller = new AbortController()
-    const proxy = new FSProxy({ dir, signal: controller.signal })
+    const proxy = new FSProxy({ dir: tmp.path, signal: controller.signal })
     const out = sink()
     out.pause()
     const done = pipeline(source(randomBytes(1024 * 1024)), proxy, out.stream)
@@ -143,13 +88,13 @@ describe('FSProxy', () => {
 
     controller.abort()
     await expect(done).rejects.toThrow()
-    await new Promise((resolve) => (proxy.closed ? resolve(null) : proxy.on('close', resolve)))
+    await closed(proxy)
 
-    expect(await readdir(dir)).toEqual([])
+    expect(await readdir(tmp.path)).toEqual([])
   })
 
   it('reports cache write errors instead of hanging', async () => {
-    const proxy = new FSProxy({ dir: join(dir, 'missing') })
+    const proxy = new FSProxy({ dir: join(tmp.path, 'missing') })
     const out = sink()
     out.pause()
 
@@ -160,14 +105,14 @@ describe('FSProxy', () => {
 
   it('keeps data under memoryThreshold off disk', async () => {
     const data = randomBytes(256 * 1024)
-    const proxy = new FSProxy({ dir, memoryThreshold: 1024 * 1024 })
+    const proxy = new FSProxy({ dir: tmp.path, memoryThreshold: 1024 * 1024 })
     const out = sink()
     out.pause()
     const done = pipeline(source(data, [10000]), proxy, out.stream)
     await new Promise((resolve) => proxy.on('finish', resolve))
 
     expect(proxy.filepath).toBeNull()
-    expect(await readdir(dir)).toEqual([])
+    expect(await readdir(tmp.path)).toEqual([])
     out.resume()
     await done
     expect(out.received.equals(data)).toBe(true)
@@ -175,7 +120,7 @@ describe('FSProxy', () => {
 
   it('preserves order across memory and disk', async () => {
     const data = randomBytes(4 * 1024 * 1024)
-    const proxy = new FSProxy({ dir, memoryThreshold: 100 * 1024, chunkSize: 9000 })
+    const proxy = new FSProxy({ dir: tmp.path, memoryThreshold: 100 * 1024, chunkSize: 9000 })
     const out = sink()
 
     // Stall and release the consumer repeatedly so data moves between
@@ -199,7 +144,7 @@ describe('FSProxy', () => {
   it('reuses cache file space once the backlog drains', async () => {
     const backlog = 2 * 1024 * 1024
     const data = randomBytes(backlog * 3)
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     const src = new Readable({ read() {} })
     const until = async (condition: () => boolean) => {
@@ -229,7 +174,7 @@ describe('FSProxy', () => {
 
   it('creates the cache file readable only by the owner', async () => {
     if (process.platform === 'win32') return
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     out.pause()
     const done = pipeline(source(randomBytes(256 * 1024)), proxy, out.stream)
@@ -242,7 +187,7 @@ describe('FSProxy', () => {
   })
 
   it('ends an empty stream without touching disk', async () => {
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     await pipeline(Readable.from([]), proxy, out.stream)
 
@@ -251,7 +196,7 @@ describe('FSProxy', () => {
   })
 
   it('accepts string writes', async () => {
-    const proxy = new FSProxy({ dir })
+    const proxy = new FSProxy({ dir: tmp.path })
     const out = sink()
     await pipeline(Readable.from(['héllo ', 'wörld'], { objectMode: false }), proxy, out.stream)
 
