@@ -11,7 +11,7 @@ import {
   parseMinFreeSpace,
   warnIfMemoryBacked,
 } from './diskSpace.ts'
-import { forgetOnExit, removeOnExit } from './exitCleanup.ts'
+import { releaseFile, trackFile } from './fileRegistry.ts'
 
 export interface SpoolOptions
   extends Pick<
@@ -321,7 +321,7 @@ export class Spool extends Duplex {
       this.#file = warnIfMemoryBacked(this.#dir)
         .then(() => open(filepath, 'wx+', 0o600))
         .then((file) => {
-          removeOnExit(filepath, file.fd)
+          trackFile(this, filepath, file)
           return file
         })
     }
@@ -396,7 +396,7 @@ export class Spool extends Duplex {
     const filepath = this.filepath as string
     const file = this.#file
     this.#file = null
-    forgetOnExit(filepath)
+    releaseFile(this, filepath)
 
     const opened = await Promise.allSettled([file])
     if (opened[0].status === 'fulfilled') await opened[0].value.close()

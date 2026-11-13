@@ -243,6 +243,44 @@ describe('Spool', () => {
     expect(existsSync(output.trim())).toBe(false)
   })
 
+  it('removes the spool file when an abandoned spool is garbage-collected', () => {
+    const entry = pathToFileURL(join(import.meta.dirname, '../../src/index.ts')).href
+    const child = `
+      import { existsSync } from 'node:fs'
+      import { Readable } from 'node:stream'
+      import { Spool } from ${JSON.stringify(entry)}
+
+      // A spool with no consumer, dropped without being ended or destroyed.
+      async function abandon() {
+        const spool = new Spool({ dir: ${JSON.stringify(tmp.path)} })
+        const src = new Readable({ read() {} })
+        src.pipe(spool)
+        src.push(Buffer.alloc(256 * 1024))
+        while (!spool.filepath || !existsSync(spool.filepath) || spool.writableLength > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        return spool.filepath
+      }
+
+      const filepath = await abandon()
+      for (let i = 0; i < 100 && existsSync(filepath); i++) {
+        globalThis.gc()
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      // Report before exit, so the exit hook can't be what removed it.
+      console.log(JSON.stringify({ filepath, exists: existsSync(filepath) }))
+    `
+    const output = execFileSync(
+      process.execPath,
+      ['--expose-gc', '--input-type=module', '-e', child],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 },
+    )
+
+    const result = JSON.parse(output)
+    expect(result.filepath).toMatch(/syke-spool-/)
+    expect(result.exists).toBe(false)
+  })
+
   it('creates the cache file readable only by the owner', async () => {
     if (process.platform === 'win32') return
     const spool = new Spool({ dir: tmp.path })

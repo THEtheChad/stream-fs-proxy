@@ -40,7 +40,8 @@ First release of `syke`. Its first utility, `Spool`, is the successor to the
 - The spool file is created only when the stream first spills, and space the
   consumer has read is reused before the file grows, so disk use tracks the
   backlog rather than the whole stream.
-- The spool file is deleted if the process exits mid-stream.
+- The spool file is deleted if the process exits mid-stream, or once a spool
+  that was dropped without being ended or destroyed is garbage-collected.
 - `Spool.from(source, options)` reads a Node readable, web `ReadableStream` or
   (async) iterable through a new spool. It overrides the inherited
   `Duplex.from()`, which returned a plain `Duplex` with no disk spooling.

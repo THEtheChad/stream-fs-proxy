@@ -10,7 +10,9 @@ const tmp = useTempDir()
 
 describe('Spool.from()', () => {
   it('returns an Spool, not the plain Duplex that Duplex.from() would', () => {
-    expect(Spool.from([Buffer.from('x')])).toBeInstanceOf(Spool)
+    const spool = Spool.from([Buffer.from('x')], { dir: tmp.path })
+    expect(spool).toBeInstanceOf(Spool)
+    spool.destroy()
   })
 
   it('reads a Node readable without holding it back', async () => {

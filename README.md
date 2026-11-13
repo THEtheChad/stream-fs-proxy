@@ -141,7 +141,9 @@ ramfs directory, it emits a process warning (`code: 'SYKE_SPOOL_TMPFS'`). Pass a
 
 The spool file is deleted when the stream ends, errors or is destroyed, and also
 if the process exits mid-stream (`process.exit()` or the event loop emptying),
-through a single shared `exit` listener.
+through a single shared `exit` listener. A spool that's dropped without being
+ended or destroyed has its file closed and deleted once it's garbage-collected,
+so abandoned streams don't accumulate files in a long-running process.
 
 Node doesn't emit `exit` when the process is killed by a signal it doesn't
 handle, such as `SIGINT` or `SIGTERM`. If your app doesn't already handle those,
