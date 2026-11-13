@@ -15,9 +15,11 @@
   ],
   "author": "Chad Elliott <chad.d.elliott@gmail.com>",
   "license": "MIT",
+  "homepage": "https://github.com/THEtheChad/syke#readme",
+  "bugs": "https://github.com/THEtheChad/syke/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thethechad/stream-fs-proxy.git"
+    "url": "git+https://github.com/THEtheChad/syke.git"
   },
   "type": "module",
   "exports": {
