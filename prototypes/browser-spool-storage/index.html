@@ -1,0 +1,542 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE · syke browser Spool storage</title>
+<style>
+  :root {
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --line: #e5e5ea;
+    --accent: #0a66c2;
+    --ok: #1a7f37;
+    --bad: #c62828;
+    font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+    color: var(--fg);
+  }
+  body { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; background: #fff; }
+  .banner { background: #fff4e5; border: 1px solid #f5c26b; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+  h1 { font-size: 22px; margin: 16px 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; }
+  p { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  th { font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .bad { color: var(--bad); font-weight: 600; }
+  pre { background: #f5f5f7; padding: 10px; border-radius: 6px; font-size: 12px; max-height: 220px; overflow: auto; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+</style>
+
+<div class="banner">
+  <strong>PROTOTYPE, throwaway.</strong> Not production code. Storage it creates is named
+  <code>syke-spool-PROTOTYPE-wipe-me</code> / <code>syke-spool-*</code>; use “Wipe prototype storage” when done.
+  Serve over localhost (for example <code>python3 -m http.server</code> in this folder); storage APIs need a real origin.
+</div>
+
+<h1>Where should a browser Spool keep its backlog?</h1>
+<p>
+  <strong>Question:</strong> a browser version of syke’s <code>Spool</code> has to park data the consumer isn’t ready
+  for somewhere other than memory. Is <strong>IndexedDB</strong> on the main thread fast enough, or do we need
+  <strong>OPFS sync access handles in a worker</strong>? And do both keep data intact when reading while writing, and
+  can leftovers from a closed tab be found and removed safely?
+</p>
+
+<h2>This browser</h2>
+<dl id="env"><dt>Checking…</dt><dd></dd></dl>
+
+<h2>Run</h2>
+<div>
+  <button id="bench">Benchmark backlog write and drain</button>
+  <button id="interleave">Check reading while writing</button>
+  <button id="cleanup">Check cleanup after a tab closes</button>
+  <button id="wipe" class="secondary">Wipe prototype storage</button>
+</div>
+<p class="muted">
+  Benchmark: for each backend and batch size, write a backlog while the consumer is “stalled”, then drain it in
+  order, verifying every byte. “Longest main-thread stall” is the longest the page was blocked during the run.
+</p>
+
+<h2>Benchmark</h2>
+<table>
+  <thead>
+    <tr><th>Backend</th><th>Batch</th><th>Write MB/s</th><th>Drain MB/s</th><th>Longest main-thread stall</th><th>Data intact</th></tr>
+  </thead>
+  <tbody id="results"><tr><td colspan="6" class="muted">Not run yet.</td></tr></tbody>
+</table>
+
+<h2>Checks</h2>
+<table>
+  <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+  <tbody id="checks"><tr><td colspan="3" class="muted">Not run yet.</td></tr></tbody>
+</table>
+
+<h2>Log</h2>
+<pre id="log"></pre>
+
+<script type="module">
+  // ---------------------------------------------------------------------------
+  // Storage backends: the part worth lifting into syke. No DOM in here.
+  // ---------------------------------------------------------------------------
+
+  const DB_NAME = 'syke-spool-PROTOTYPE-wipe-me'
+  const STORE = 'chunks'
+  const LOCK_PREFIX = 'syke-spool:'
+  const FILE_PREFIX = 'syke-spool-'
+
+  function openDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 1)
+      // One shared store keyed [spoolId, seq]; never one store per spool, since
+      // adding a store needs a version upgrade that blocks other tabs.
+      request.onupgradeneeded = () => request.result.createObjectStore(STORE)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+  }
+
+  function transact(db, durability, fn) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite', { durability })
+      const result = fn(tx.objectStore(STORE))
+      tx.oncomplete = () => resolve(result)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error)
+    })
+  }
+
+  /** Holds the spool's Web Lock until `release()`; the browser drops it if the tab dies. */
+  function holdLock(spoolId) {
+    let release
+    const held = new Promise((resolve) => {
+      navigator.locks.request(LOCK_PREFIX + spoolId, () => {
+        resolve()
+        return new Promise((r) => (release = r))
+      })
+    })
+    return held.then(() => () => release())
+  }
+
+  /** FIFO of records: write appends a record, read takes and deletes the oldest. */
+  class IdbQueue {
+    static async create(db, spoolId, durability) {
+      const release = await holdLock(spoolId)
+      return new IdbQueue(db, spoolId, durability, release)
+    }
+    constructor(db, spoolId, durability, release) {
+      Object.assign(this, { db, spoolId, durability, release, head: 0, tail: 0 })
+    }
+    write(bytes) {
+      const key = [this.spoolId, this.tail++]
+      return transact(this.db, this.durability, (store) => void store.put(bytes, key))
+    }
+    async read() {
+      if (this.head === this.tail) return null
+      const key = [this.spoolId, this.head++]
+      const box = {}
+      await transact(this.db, this.durability, (store) => {
+        const get = store.get(key)
+        get.onsuccess = () => (box.value = get.result)
+        store.delete(key)
+      })
+      return box.value
+    }
+    async close() {
+      const range = IDBKeyRange.bound([this.spoolId, -Infinity], [this.spoolId, Infinity])
+      await transact(this.db, this.durability, (store) => void store.delete(range))
+      this.release()
+    }
+  }
+
+  // The worker owns one OPFS file per spool through a sync access handle,
+  // appending at writePos and reading at readPos. Messages are handled one at a
+  // time so a read can never overtake an earlier write.
+  const workerSource = `
+    const files = new Map()
+    const rootPromise = navigator.storage.getDirectory()
+    let chain = Promise.resolve()
+    onmessage = (event) => { chain = chain.then(() => handle(event.data)) }
+    async function handle({ id, op, spoolId, bytes, length }) {
+      try {
+        const root = await rootPromise
+        if (op === 'caps') {
+          const fh = await root.getFileHandle('${FILE_PREFIX}caps-probe', { create: true })
+          const ok = typeof fh.createSyncAccessHandle === 'function'
+          await root.removeEntry('${FILE_PREFIX}caps-probe')
+          return postMessage({ id, value: ok })
+        }
+        if (op === 'open') {
+          const fh = await root.getFileHandle('${FILE_PREFIX}' + spoolId, { create: true })
+          const handle = await fh.createSyncAccessHandle()
+          handle.truncate(0)
+          files.set(spoolId, { handle, readPos: 0, writePos: 0 })
+          return postMessage({ id })
+        }
+        const f = files.get(spoolId)
+        if (op === 'write') {
+          const u = new Uint8Array(bytes)
+          let off = 0
+          while (off < u.length) off += f.handle.write(u.subarray(off), { at: f.writePos + off })
+          f.writePos += u.length
+          return postMessage({ id })
+        }
+        if (op === 'read') {
+          const n = Math.min(length, f.writePos - f.readPos)
+          if (n === 0) return postMessage({ id, value: null })
+          const buf = new Uint8Array(n)
+          const got = f.handle.read(buf, { at: f.readPos })
+          f.readPos += got
+          // Drained: reuse the file from the start.
+          if (f.readPos === f.writePos) f.readPos = f.writePos = 0
+          return postMessage({ id, value: buf.buffer }, [buf.buffer])
+        }
+        if (op === 'close') {
+          f.handle.close()
+          files.delete(spoolId)
+          await root.removeEntry('${FILE_PREFIX}' + spoolId)
+          return postMessage({ id })
+        }
+      } catch (error) {
+        postMessage({ id, error: String(error) })
+      }
+    }
+  `
+
+  let worker
+  let nextCall = 0
+  const pending = new Map()
+  function callWorker(message, transfer = []) {
+    worker ??= (() => {
+      const w = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
+      w.onmessage = ({ data }) => {
+        const { resolve, reject } = pending.get(data.id)
+        pending.delete(data.id)
+        data.error ? reject(new Error(data.error)) : resolve(data.value)
+      }
+      return w
+    })()
+    const id = nextCall++
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject })
+      worker.postMessage({ id, ...message }, transfer)
+    })
+  }
+
+  class OpfsWorkerQueue {
+    static async create(spoolId) {
+      const release = await holdLock(spoolId)
+      await callWorker({ op: 'open', spoolId })
+      return new OpfsWorkerQueue(spoolId, release)
+    }
+    constructor(spoolId, release) {
+      Object.assign(this, { spoolId, release })
+    }
+    write(bytes) {
+      // Transfer, not clone: the copy is ours, so the worker can take it without another copy.
+      const copy = bytes.slice()
+      return callWorker({ op: 'write', spoolId: this.spoolId, bytes: copy.buffer }, [copy.buffer])
+    }
+    async read(length) {
+      const buffer = await callWorker({ op: 'read', spoolId: this.spoolId, length })
+      return buffer && new Uint8Array(buffer)
+    }
+    async close() {
+      await callWorker({ op: 'close', spoolId: this.spoolId })
+      this.release()
+    }
+  }
+
+  /**
+   * Deletes the data of every spool whose lock isn't held, i.e. whose tab is
+   * gone. Taking the lock (ifAvailable) before deleting means a live spool can
+   * never be swept, even by another tab.
+   */
+  async function sweep(db, root) {
+    const ids = new Set()
+    await new Promise((resolve, reject) => {
+      const cursor = db.transaction(STORE).objectStore(STORE).openKeyCursor()
+      cursor.onsuccess = () => {
+        const c = cursor.result
+        if (!c) return resolve()
+        ids.add(c.key[0])
+        c.continue()
+      }
+      cursor.onerror = () => reject(cursor.error)
+    })
+    for await (const name of root.keys()) {
+      if (name.startsWith(FILE_PREFIX) && name !== `${FILE_PREFIX}caps-probe`) ids.add(name.slice(FILE_PREFIX.length))
+    }
+    const removed = []
+    const kept = []
+    for (const id of ids) {
+      await navigator.locks.request(LOCK_PREFIX + id, { ifAvailable: true }, async (lock) => {
+        if (!lock) return kept.push(id)
+        const range = IDBKeyRange.bound([id, -Infinity], [id, Infinity])
+        await transact(db, 'relaxed', (store) => void store.delete(range))
+        await root.removeEntry(FILE_PREFIX + id).catch(() => {})
+        removed.push(id)
+      })
+    }
+    return { removed, kept }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page shell: throwaway.
+  // ---------------------------------------------------------------------------
+
+  const $ = (id) => document.getElementById(id)
+  const log = (line) => {
+    $('log').textContent += line + '\n'
+    $('log').scrollTop = $('log').scrollHeight
+  }
+  const MB = 1024 * 1024
+  const fmtBytes = (n) => (n >= MB ? `${n / MB} MB` : `${n / 1024} KB`)
+  window.__proto = { results: [], checks: [], running: false }
+
+  function randomBytes(size) {
+    const out = new Uint8Array(size)
+    for (let i = 0; i < size; i += 65536) crypto.getRandomValues(out.subarray(i, i + 65536))
+    return out
+  }
+  const stamp = (bytes, i) => new DataView(bytes.buffer, bytes.byteOffset).setUint32(0, i)
+  const stampOf = (bytes) => new DataView(bytes.buffer, bytes.byteOffset).getUint32(0)
+  function sameAfterStamp(a, b) {
+    if (a.length !== b.length) return false
+    for (let i = 4; i < a.length; i++) if (a[i] !== b[i]) return false
+    return true
+  }
+
+  /** Longest gap between timer ticks while `fn` runs: how long the page was blocked. */
+  async function measureStall(fn) {
+    let last = performance.now()
+    let worst = 0
+    const timer = setInterval(() => {
+      const now = performance.now()
+      worst = Math.max(worst, now - last)
+      last = now
+    }, 4)
+    try {
+      return { value: await fn(), stallMs: Math.max(0, worst - 4) }
+    } finally {
+      clearInterval(timer)
+    }
+  }
+
+  const backends = {
+    'IndexedDB (relaxed durability)': async (db, id) => IdbQueue.create(db, id, 'relaxed'),
+    'IndexedDB (default durability)': async (db, id) => IdbQueue.create(db, id, 'default'),
+    'OPFS sync handle in a worker': async (_db, id) => OpfsWorkerQueue.create(id),
+  }
+
+  async function benchOne(db, name, batch, total) {
+    const template = randomBytes(batch)
+    const count = total / batch
+    const queue = await backends[name](db, crypto.randomUUID())
+    let writeMs = 0
+    let readMs = 0
+    let intact = true
+    const { stallMs } = await measureStall(async () => {
+      for (let i = 0; i < count; i++) {
+        stamp(template, i)
+        const t = performance.now()
+        await queue.write(template)
+        writeMs += performance.now() - t
+      }
+      for (let i = 0; i < count; i++) {
+        const t = performance.now()
+        const got = await queue.read(batch)
+        readMs += performance.now() - t
+        if (!got || stampOf(got) !== i || !sameAfterStamp(got, template)) intact = false
+      }
+    })
+    await queue.close()
+    return {
+      backend: name,
+      batch,
+      writeMBps: total / MB / (writeMs / 1000),
+      drainMBps: total / MB / (readMs / 1000),
+      stallMs,
+      intact,
+    }
+  }
+
+  function renderResults() {
+    $('results').innerHTML = window.__proto.results
+      .map(
+        (r) => `<tr><td>${r.backend}</td><td>${fmtBytes(r.batch)}</td><td>${r.writeMBps.toFixed(0)}</td>` +
+          `<td>${r.drainMBps.toFixed(0)}</td><td>${r.stallMs.toFixed(0)} ms</td>` +
+          `<td class="${r.intact ? 'ok' : 'bad'}">${r.intact ? 'yes' : 'NO'}</td></tr>`,
+      )
+      .join('')
+  }
+  function addCheck(name, ok, detail) {
+    window.__proto.checks.push({ name, ok, detail })
+    $('checks').innerHTML = window.__proto.checks
+      .map((c) => `<tr><td>${c.name}</td><td class="${c.ok ? 'ok' : 'bad'}">${c.ok ? 'pass' : 'FAIL'}</td><td>${c.detail}</td></tr>`)
+      .join('')
+    log(`${c_ok(ok)} ${name}: ${detail}`)
+  }
+  const c_ok = (ok) => (ok ? '✓' : '✗')
+
+  async function run(button, fn) {
+    if (window.__proto.running) return
+    window.__proto.running = true
+    document.querySelectorAll('button').forEach((b) => (b.disabled = true))
+    try {
+      await fn()
+    } catch (error) {
+      log('ERROR ' + (error?.stack ?? error))
+      window.__proto.error = String(error)
+    } finally {
+      window.__proto.running = false
+      document.querySelectorAll('button').forEach((b) => (b.disabled = false))
+    }
+  }
+
+  async function showEnvironment() {
+    const estimate = await navigator.storage.estimate()
+    const syncHandle = await callWorker({ op: 'caps' }).catch((e) => `no (${e.message})`)
+    const env = {
+      'User agent': navigator.userAgent,
+      'Secure context': String(isSecureContext),
+      'Storage quota': `${(estimate.quota / 1024 ** 3).toFixed(1)} GB (using ${(estimate.usage / MB).toFixed(1)} MB)`,
+      'Storage persisted': String(await navigator.storage.persisted?.()),
+      'OPFS sync handle in worker': String(syncHandle),
+      'OPFS createWritable on main thread': String(typeof FileSystemFileHandle?.prototype?.createWritable === 'function'),
+      'Web Locks': String(!!navigator.locks),
+    }
+    window.__proto.env = env
+    $('env').innerHTML = Object.entries(env).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')
+  }
+
+  $('bench').onclick = () =>
+    run($('bench'), async () => {
+      const total = Number(new URLSearchParams(location.search).get('mb') ?? 64) * MB
+      const db = await openDb()
+      window.__proto.results = []
+      for (const name of Object.keys(backends)) {
+        for (const batch of [64 * 1024, 256 * 1024, MB, 4 * MB]) {
+          log(`benchmark: ${name}, ${fmtBytes(batch)} batches, ${total / MB} MB…`)
+          window.__proto.results.push(await benchOne(db, name, batch, total))
+          renderResults()
+        }
+      }
+      db.close()
+      log('benchmark done')
+    })
+
+  $('interleave').onclick = () =>
+    run($('interleave'), async () => {
+      const db = await openDb()
+      for (const name of Object.keys(backends)) {
+        const queue = await backends[name](db, crypto.randomUUID())
+        const template = randomBytes(100_000)
+        const isOpfs = name.startsWith('OPFS')
+        let written = 0
+        let readBytes = 0
+        let ok = true
+        let buffered = new Uint8Array(0)
+        // Random interleaving of writes and reads; OPFS reads use random sizes
+        // that split records, so check the reassembled byte stream.
+        for (let step = 0; step < 3000; step++) {
+          if (Math.random() < 0.55) {
+            stamp(template, written++)
+            await queue.write(template)
+          } else {
+            const got = await queue.read(isOpfs ? 1 + Math.floor(Math.random() * 250_000) : 0)
+            if (!got) continue
+            readBytes += got.length
+            const merged = new Uint8Array(buffered.length + got.length)
+            merged.set(buffered)
+            merged.set(got, buffered.length)
+            buffered = merged
+          }
+          while (buffered.length >= template.length) {
+            const record = buffered.subarray(0, template.length)
+            const expect = (readBytes - buffered.length) / template.length
+            if (stampOf(record) !== expect || !sameAfterStamp(record, template)) ok = false
+            buffered = buffered.slice(template.length)
+          }
+        }
+        await queue.close()
+        addCheck(`Read while writing: ${name}`, ok, `${written} records written, ${(readBytes / MB).toFixed(1)} MB read back in order`)
+      }
+      db.close()
+    })
+
+  $('cleanup').onclick = () =>
+    run($('cleanup'), async () => {
+      const db = await openDb()
+      const root = await navigator.storage.getDirectory()
+      const orphan = 'tab-' + crypto.randomUUID()
+
+      // A same-origin iframe stands in for another tab: it creates spool data
+      // and holds the spool's lock, then we "close the tab" by removing it.
+      const frame = document.createElement('iframe')
+      frame.hidden = true
+      const ready = new Promise((resolve) => addEventListener('message', function on(e) {
+        if (e.data?.orphanReady === orphan) { removeEventListener('message', on); resolve() }
+      }))
+      frame.srcdoc = `<script type="module">
+        const db = await new Promise((res, rej) => { const r = indexedDB.open('${DB_NAME}', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error) })
+        await new Promise((res) => { const tx = db.transaction('${STORE}', 'readwrite'); for (let i = 0; i < 3; i++) tx.objectStore('${STORE}').put(new Uint8Array(1024), ['${orphan}', i]); tx.oncomplete = res })
+        const root = await navigator.storage.getDirectory()
+        await root.getFileHandle('${FILE_PREFIX}${orphan}', { create: true })
+        navigator.locks.request('${LOCK_PREFIX}${orphan}', () => { parent.postMessage({ orphanReady: '${orphan}' }, '*'); return new Promise(() => {}) })
+      <\/script>`
+      document.body.append(frame)
+      await ready
+
+      const whileOpen = await sweep(db, root)
+      addCheck(
+        'Sweep leaves a live tab’s spool alone',
+        whileOpen.kept.includes(orphan) && !whileOpen.removed.includes(orphan),
+        `kept: ${whileOpen.kept.length}, removed: ${whileOpen.removed.length}`,
+      )
+
+      frame.remove()
+      // The browser releases the closed frame's locks asynchronously.
+      let afterClose
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 50))
+        const { held } = await navigator.locks.query()
+        if (!held.some((l) => l.name === LOCK_PREFIX + orphan)) break
+      }
+      afterClose = await sweep(db, root)
+      const recordsLeft = await new Promise((resolve) => {
+        const r = db.transaction(STORE).objectStore(STORE).count(IDBKeyRange.bound([orphan, -Infinity], [orphan, Infinity]))
+        r.onsuccess = () => resolve(r.result)
+      })
+      const fileLeft = await root.getFileHandle(FILE_PREFIX + orphan).then(() => true, () => false)
+      addCheck(
+        'Sweep removes a closed tab’s spool',
+        afterClose.removed.includes(orphan) && recordsLeft === 0 && !fileLeft,
+        `records left: ${recordsLeft}, file left: ${fileLeft}`,
+      )
+      db.close()
+    })
+
+  $('wipe').onclick = () =>
+    run($('wipe'), async () => {
+      await new Promise((resolve) => {
+        const r = indexedDB.deleteDatabase(DB_NAME)
+        r.onsuccess = r.onerror = r.onblocked = resolve
+      })
+      const root = await navigator.storage.getDirectory()
+      let files = 0
+      for await (const name of root.keys()) {
+        if (name.startsWith(FILE_PREFIX)) {
+          await root.removeEntry(name)
+          files++
+        }
+      }
+      log(`wiped: database ${DB_NAME} and ${files} OPFS file(s)`)
+      window.__proto.wiped = true
+    })
+
+  showEnvironment().catch((e) => log('environment check failed: ' + e))
+</script>
