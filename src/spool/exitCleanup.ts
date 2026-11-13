@@ -7,7 +7,7 @@ let hookInstalled = false
 /**
  * Deletes `filepath` if the process exits before the stream cleans it up.
  * One shared `exit` listener covers every stream, so many concurrent
- * proxies don't trip the max-listeners warning.
+ * spools don't trip the max-listeners warning.
  */
 export function removeOnExit(filepath: string, fd: number): void {
   if (!hookInstalled) {

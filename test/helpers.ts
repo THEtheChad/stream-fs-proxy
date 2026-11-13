@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { afterEach, beforeEach } from 'vitest'
-import type { FSProxy } from '../src/index.ts'
+import type { Spool } from '../src/index.ts'
 
 /** A fresh temp directory per test; read `.path` inside the test. */
 export function useTempDir(): { readonly path: string } {
   const state = { path: '' }
   beforeEach(async () => {
-    state.path = await mkdtemp(join(tmpdir(), 'fs-proxy-test-'))
+    state.path = await mkdtemp(join(tmpdir(), 'syke-test-'))
   })
   afterEach(async () => {
     await rm(state.path, { recursive: true, force: true })
@@ -85,28 +85,28 @@ export async function until(condition: () => boolean, timeoutMs = 4000): Promise
 export const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
-export function closed(proxy: FSProxy): Promise<void> {
-  return new Promise((resolve) => (proxy.closed ? resolve() : proxy.once('close', () => resolve())))
+export function closed(spool: Spool): Promise<void> {
+  return new Promise((resolve) => (spool.closed ? resolve() : spool.once('close', () => resolve())))
 }
 
-export function fileSize(proxy: FSProxy): number {
+export function fileSize(spool: Spool): number {
   try {
-    return proxy.filepath ? statSync(proxy.filepath).size : 0
+    return spool.filepath ? statSync(spool.filepath).size : 0
   } catch {
     return 0
   }
 }
 
 /** Samples the cache file's size every millisecond; `stop()` returns the largest seen. */
-export function watchFileSize(proxy: FSProxy): { stop(): number } {
+export function watchFileSize(spool: Spool): { stop(): number } {
   let peak = 0
   const timer = setInterval(() => {
-    peak = Math.max(peak, fileSize(proxy))
+    peak = Math.max(peak, fileSize(spool))
   }, 1)
   return {
     stop() {
       clearInterval(timer)
-      return Math.max(peak, fileSize(proxy))
+      return Math.max(peak, fileSize(spool))
     },
   }
 }

@@ -1,7 +1,8 @@
 import { defineConfig, type UserConfig } from 'tsdown'
 
 const config: UserConfig = defineConfig({
-  entry: ['src/index.ts'],
+  // One entry per utility, so `syke/spool` loads only what it needs.
+  entry: { index: 'src/index.ts', spool: 'src/spool/index.ts' },
   format: ['esm', 'cjs'],
   platform: 'node',
   target: 'node22',

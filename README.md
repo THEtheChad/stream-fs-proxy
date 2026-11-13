@@ -1,7 +1,28 @@
-# stream-fs-proxy
+# syke
+
+Stream utilities for memory-bound work in Node.js.
+
+A *syke* (rhymes with *bike*) is a small stream, in northern English and Scots
+dialect.
+
+| Utility | What it does |
+| ------- | ------------ |
+| [`Spool`](#spool) | A pass-through that spills to disk instead of applying backpressure to its source |
+
+## Install
+
+```sh
+pnpm add syke
+# or: npm install syke
+```
+
+Requires Node.js 22 or later. Ships ESM, CommonJS and TypeScript types. Import
+everything from `syke`, or one utility from its own path (`syke/spool`).
+
+## Spool
 
 A pass-through stream that doesn't apply backpressure to its source. Whatever the
-consumer isn't ready for is spilled to a temporary file and read back, a bounded
+consumer isn't ready for is spooled to a temporary file and read back, a bounded
 chunk at a time, as the consumer catches up.
 
 Reach for it when:
@@ -15,90 +36,81 @@ Reach for it when:
 Memory stays bounded by the stream's high-water mark plus `chunkSize` (and
 `memoryThreshold`, if you set one), however far the consumer falls behind. Disk
 usage tracks the backlog, not the stream: space the consumer has already read is
-reused before the cache file grows. By default it also stops spilling before the
+reused before the spool file grows. By default it also stops spooling before the
 disk drops below 10% free (see [Disk limits](#disk-limits)), and the file is
 removed even if the process exits mid-stream.
 
-## Install
-
-```sh
-pnpm add stream-fs-proxy
-# or: npm install stream-fs-proxy
-```
-
-Requires Node.js 22 or later. Ships ESM, CommonJS and TypeScript types.
-
-## Usage
+### Usage
 
 ```js
 import { pipeline } from 'node:stream/promises'
-import { FSProxy } from 'stream-fs-proxy'
+import { Spool } from 'syke'
 
 const res = await fetch('https://example.com/large-dataset.ndjson')
 
-await pipeline(res.body, new FSProxy(), slowDatabaseWriter)
+await pipeline(res.body, new Spool(), slowDatabaseWriter)
 ```
 
 CommonJS works too:
 
 ```js
-const { FSProxy } = require('stream-fs-proxy')
+const { Spool } = require('syke')
 ```
 
 Use `pipeline` rather than chained `.pipe()` calls so that an error anywhere in
 the chain destroys every stream and the temporary file is removed.
 
-### `FSProxy.from()` and `FSProxy.toWeb()`
+### `Spool.from()` and `Spool.toWeb()`
 
-Following Node's `Readable.from()` convention, `FSProxy.from(source, options?)`
-reads a source through a new proxy. It accepts a Node readable, a web
+Following Node's `Readable.from()` convention, `Spool.from(source, options?)`
+reads a source through a new spool. It accepts a Node readable, a web
 `ReadableStream` (such as `fetch().body`), or an iterable or async iterable of
 chunks. Errors and destruction propagate both ways, as with `pipeline`.
 
 ```js
 const res = await fetch('https://example.com/large-dataset.ndjson')
-FSProxy.from(res.body).pipe(slowDatabaseWriter)
+Spool.from(res.body).pipe(slowDatabaseWriter)
 ```
 
-`FSProxy.toWeb(proxy)` (inherited from `Duplex`) turns a proxy into a
+`Spool.toWeb(spool)` (inherited from `Duplex`) turns a spool into a
 `{ readable, writable }` pair for Web Streams code:
 
 ```js
 await res.body
-  .pipeThrough(FSProxy.toWeb(new FSProxy()))
+  .pipeThrough(Spool.toWeb(new Spool()))
   .pipeTo(slowWebWritable)
 ```
 
-## Options
+### Options
 
-`new FSProxy(options?)`
+`new Spool(options?)`
 
 | Option                  | Default                     | Description                                                                                                  |
 | ----------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `dir`                   | `os.tmpdir()`               | Directory for the cache file.                                                                                |
+| `dir`                   | `os.tmpdir()`               | Directory for the spool file.                                                                                |
 | `chunkSize`             | readable high-water mark    | Largest chunk, in bytes, read back from disk and pushed downstream.                                          |
-| `memoryThreshold`       | `0`                         | Bytes to hold in memory before spilling to disk. Small bursts under this size never touch disk.             |
+| `memoryThreshold`       | `0`                         | Bytes to hold in memory before spooling to disk. Small bursts under this size never touch disk.             |
 | `minFreeSpace`          | `'10%'`                     | Free space to leave on `dir`'s filesystem: a percentage (`'10%'`), bytes, or `false` for no floor.           |
-| `maxDiskBytes`          | no cap                      | Largest size the cache file may reach, in bytes.                                                             |
+| `maxDiskBytes`          | no cap                      | Largest size the spool file may reach, in bytes.                                                             |
 | `onLimit`               | `'backpressure'`            | What happens at a disk limit: `'backpressure'` pauses the source, `'error'` fails the stream.               |
 | `highWaterMark`, `readableHighWaterMark`, `writableHighWaterMark`, `signal` | Node defaults | Passed through to `stream.Duplex`. Aborting `signal` destroys the stream and removes the file. |
 
 The stream is byte-oriented: strings are written as UTF-8 buffers, and object
 mode isn't supported.
 
-`proxy.filepath` holds the cache file's path once the stream first spills to disk
+`spool.filepath` holds the spool file's path once the stream first spills to disk
 (it's `null` until then).
 
-## Disk limits
+### Disk limits
 
-Two limits keep the cache file from filling the disk:
+Two limits keep the spool file from filling the disk:
 
 - **`minFreeSpace`** (default `'10%'`) checks the filesystem's real free space
-  whenever the cache file is about to grow, and won't grow it past the floor.
+  whenever the spool file is about to grow, and won't grow it past the floor.
   Because it reads live free space, every stream (and every other process) shares
-  the same floor, so many parallel proxies can't oversubscribe the disk. If free
+  the same floor, so many parallel spools can't oversubscribe the disk. If free
   space can't be read on a platform, the floor isn't enforced.
-- **`maxDiskBytes`** caps the size of one stream's cache file.
+- **`maxDiskBytes`** caps the size of one stream's spool file.
 
 At a limit, new data goes into any space the consumer has already read, so the
 source resumes as soon as the consumer frees some room rather than after the
@@ -108,26 +120,26 @@ If there's no room at all, `onLimit` decides:
 
 - `'backpressure'` (default): the source is paused, as with an ordinary stream,
   until the consumer frees space or free space recovers. Data is never dropped.
-- `'error'`: the stream fails with an `FSProxyLimitError`
-  (`code: 'ERR_STREAM_FS_PROXY_LIMIT'`), for when a stalled source is worse than
-  a failed one.
+- `'error'`: the stream fails with a `SpoolLimitError`
+  (`code: 'ERR_SYKE_SPOOL_LIMIT'`), for when a stalled source is worse than a
+  failed one.
 
 ```js
-import { FSProxy, FSProxyLimitError } from 'stream-fs-proxy'
+import { Spool, SpoolLimitError } from 'syke'
 
-new FSProxy({ maxDiskBytes: 2 * 1024 ** 3, minFreeSpace: '20%', onLimit: 'error' })
+new Spool({ maxDiskBytes: 2 * 1024 ** 3, minFreeSpace: '20%', onLimit: 'error' })
 ```
 
-### Memory-backed temp directories
+#### Memory-backed temp directories
 
-On some Linux systems `/tmp` is a `tmpfs`, which lives in RAM, so "spilling to
-disk" there still uses memory. The first time a proxy spills into a tmpfs or
-ramfs directory, it emits a process warning (`code: 'STREAM_FS_PROXY_TMPFS'`).
-Pass a `dir` on a real disk to fix it.
+On some Linux systems `/tmp` is a `tmpfs`, which lives in RAM, so spooling "to
+disk" there still uses memory. The first time a spool writes into a tmpfs or
+ramfs directory, it emits a process warning (`code: 'SYKE_SPOOL_TMPFS'`). Pass a
+`dir` on a real disk to fix it.
 
-## Cleanup on exit
+### Cleanup on exit
 
-The cache file is deleted when the stream ends, errors or is destroyed, and also
+The spool file is deleted when the stream ends, errors or is destroyed, and also
 if the process exits mid-stream (`process.exit()` or the event loop emptying),
 through a single shared `exit` listener.
 
@@ -141,17 +153,17 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 }
 ```
 
-The library doesn't install signal handlers itself, since that would change how
-your app shuts down. Nothing can clean up after `SIGKILL` or a crash of the OS;
-files left that way are named `stream-fs-proxy-*` in the cache directory.
+syke doesn't install signal handlers itself, since that would change how your app
+shuts down. Nothing can clean up after `SIGKILL` or a crash of the OS; files left
+that way are named `syke-spool-*` in the spool directory.
 
-## How it works
+### How it works
 
 - If the consumer is waiting and nothing is queued, a chunk is handed straight
   through without touching disk.
 - Otherwise it goes to memory (up to `memoryThreshold`) or is appended to the
-  cache file. Order is always preserved.
-- The cache file is created lazily with mode `0600`, so a stream that never falls
+  spool file. Order is always preserved.
+- The spool file is created lazily with mode `0600`, so a stream that never falls
   behind never creates one.
 - The file holds unread data as a short list of regions. Reads take from the
   oldest region; writes extend the newest one or start a new region in space the
@@ -160,13 +172,24 @@ files left that way are named `stream-fs-proxy-*` in the cache directory.
 - The file is closed and deleted when the stream ends, errors, is destroyed or
   the process exits.
 
-## Prior art
+### Prior art
 
 [`fs-capacitor`](https://github.com/mike-marcacci/fs-capacitor) also buffers to a
 temporary file, and supports multiple readers of the same buffered data. Use it if
-you need to replay the stream. `stream-fs-proxy` is a single pass-through: it
-skips the disk while the consumer keeps up, reuses space as data is read, and can
-cap disk use, but it can't replay data that's already been read.
+you need to replay the stream. `Spool` is a single pass-through: it skips the disk
+while the consumer keeps up, reuses space as data is read, and can cap disk use,
+but it can't replay data that's already been read.
+
+## Migrating from stream-fs-proxy
+
+`Spool` is the successor to the `stream-fs-proxy` package's `FSProxy`:
+
+| stream-fs-proxy 1.x | syke |
+| ------------------- | ---- |
+| `require('stream-fs-proxy').default` | `const { Spool } = require('syke')` |
+| `new FSProxy()` | `new Spool()` |
+
+See the [changelog](CHANGELOG.md) for the bugs fixed along the way.
 
 ## License
 

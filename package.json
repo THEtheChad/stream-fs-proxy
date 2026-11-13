@@ -1,15 +1,17 @@
 {
-  "name": "stream-fs-proxy",
-  "version": "2.0.0",
-  "description": "Pass-through stream that spills to a temporary file instead of applying backpressure to its source.",
+  "name": "syke",
+  "version": "0.1.0",
+  "description": "Stream utilities for memory-bound work in Node.js. Spool: a pass-through that spills to disk instead of applying backpressure to its source.",
   "keywords": [
     "stream",
+    "streams",
     "backpressure",
-    "buffer",
+    "spool",
     "disk buffer",
     "spill to disk",
     "temp file",
-    "duplex"
+    "duplex",
+    "memory"
   ],
   "author": "Chad Elliott <chad.d.elliott@gmail.com>",
   "license": "MIT",
@@ -27,6 +29,16 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./spool": {
+      "import": {
+        "types": "./dist/spool.d.mts",
+        "default": "./dist/spool.mjs"
+      },
+      "require": {
+        "types": "./dist/spool.d.cts",
+        "default": "./dist/spool.cjs"
       }
     },
     "./package.json": "./package.json"

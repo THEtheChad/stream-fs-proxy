@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { FSProxy, FSProxyLimitError } from '../src/index.ts'
-import { closed, fileSize, sink, sleep, source, until, useTempDir, watchFileSize } from './helpers.ts'
+import { Spool, SpoolLimitError } from '../../src/index.ts'
+import { closed, fileSize, sink, sleep, source, until, useTempDir, watchFileSize } from '../helpers.ts'
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -40,21 +40,21 @@ describe('maxDiskBytes', () => {
   it('pauses the source once the cache file reaches the cap, then resumes', async () => {
     const cap = 256 * 1024
     const data = randomBytes(2 * MiB)
-    const proxy = new FSProxy({ dir: tmp.path, maxDiskBytes: cap })
+    const spool = new Spool({ dir: tmp.path, maxDiskBytes: cap })
     const out = sink()
     out.pause()
     let finished = false
-    proxy.on('finish', () => {
+    spool.on('finish', () => {
       finished = true
     })
 
-    const done = pipeline(source(data), proxy, out.stream)
-    await until(() => fileSize(proxy) === cap)
+    const done = pipeline(source(data), spool, out.stream)
+    await until(() => fileSize(spool) === cap)
     await sleep(50)
-    expect(fileSize(proxy)).toBe(cap)
+    expect(fileSize(spool)).toBe(cap)
     expect(finished).toBe(false)
 
-    const size = watchFileSize(proxy)
+    const size = watchFileSize(spool)
     out.resume()
     await done
 
@@ -65,9 +65,9 @@ describe('maxDiskBytes', () => {
   it('wraps around the cache file without reordering data', async () => {
     const cap = 100_000
     const data = randomBytes(4 * MiB)
-    const proxy = new FSProxy({ dir: tmp.path, maxDiskBytes: cap, chunkSize: 9000 })
+    const spool = new Spool({ dir: tmp.path, maxDiskBytes: cap, chunkSize: 9000 })
     const out = sink()
-    const size = watchFileSize(proxy)
+    const size = watchFileSize(spool)
 
     let stalls = 0
     const timer = setInterval(() => {
@@ -76,7 +76,7 @@ describe('maxDiskBytes', () => {
     }, 2)
 
     try {
-      await pipeline(source(data, [1, 4096, 50_000, 130_000]), proxy, out.stream)
+      await pipeline(source(data, [1, 4096, 50_000, 130_000]), spool, out.stream)
     } finally {
       clearInterval(timer)
     }
@@ -87,29 +87,29 @@ describe('maxDiskBytes', () => {
 
   it('handles a cap smaller than a single chunk', async () => {
     const data = randomBytes(MiB)
-    const proxy = new FSProxy({ dir: tmp.path, maxDiskBytes: 1000, chunkSize: 300 })
+    const spool = new Spool({ dir: tmp.path, maxDiskBytes: 1000, chunkSize: 300 })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(data), proxy, out.stream)
-    await until(() => fileSize(proxy) === 1000)
+    const done = pipeline(source(data), spool, out.stream)
+    await until(() => fileSize(spool) === 1000)
     out.resume()
     await done
 
     expect(out.received.equals(data)).toBe(true)
   })
 
-  it("fails with FSProxyLimitError when onLimit is 'error'", async () => {
-    const proxy = new FSProxy({ dir: tmp.path, maxDiskBytes: 256 * 1024, onLimit: 'error' })
+  it("fails with SpoolLimitError when onLimit is 'error'", async () => {
+    const spool = new Spool({ dir: tmp.path, maxDiskBytes: 256 * 1024, onLimit: 'error' })
     const out = sink()
     out.pause()
 
-    const error = await pipeline(source(randomBytes(MiB)), proxy, out.stream).catch((e) => e)
-    expect(error).toBeInstanceOf(FSProxyLimitError)
-    expect(error).toMatchObject({ code: 'ERR_STREAM_FS_PROXY_LIMIT' })
+    const error = await pipeline(source(randomBytes(MiB)), spool, out.stream).catch((e) => e)
+    expect(error).toBeInstanceOf(SpoolLimitError)
+    expect(error).toMatchObject({ code: 'ERR_SYKE_SPOOL_LIMIT' })
     expect(error.message).toMatch(/maxDiskBytes/)
 
-    await closed(proxy)
+    await closed(spool)
     expect(await readdir(tmp.path)).toEqual([])
   })
 })
@@ -118,14 +118,14 @@ describe('minFreeSpace', () => {
   it('stops growing the cache file at a byte floor', async () => {
     fakeDisk({ total: 100 * MiB, free: 10 * MiB })
     const data = randomBytes(2 * MiB)
-    const proxy = new FSProxy({ dir: tmp.path, minFreeSpace: 10 * MiB - 512 * 1024 })
+    const spool = new Spool({ dir: tmp.path, minFreeSpace: 10 * MiB - 512 * 1024 })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(data), proxy, out.stream)
-    await until(() => fileSize(proxy) === 512 * 1024)
+    const done = pipeline(source(data), spool, out.stream)
+    await until(() => fileSize(spool) === 512 * 1024)
     await sleep(50)
-    expect(fileSize(proxy)).toBe(512 * 1024)
+    expect(fileSize(spool)).toBe(512 * 1024)
 
     out.resume()
     await done
@@ -134,14 +134,14 @@ describe('minFreeSpace', () => {
 
   it('accepts a percentage of the filesystem', async () => {
     fakeDisk({ total: 100 * MiB, free: 10 * MiB + 512 * 1024 })
-    const proxy = new FSProxy({ dir: tmp.path, minFreeSpace: '10%' })
+    const spool = new Spool({ dir: tmp.path, minFreeSpace: '10%' })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(randomBytes(2 * MiB)), proxy, out.stream)
-    await until(() => fileSize(proxy) === 512 * 1024)
+    const done = pipeline(source(randomBytes(2 * MiB)), spool, out.stream)
+    await until(() => fileSize(spool) === 512 * 1024)
     await sleep(50)
-    expect(fileSize(proxy)).toBe(512 * 1024)
+    expect(fileSize(spool)).toBe(512 * 1024)
 
     out.resume()
     await done
@@ -149,14 +149,14 @@ describe('minFreeSpace', () => {
 
   it("defaults to '10%'", async () => {
     fakeDisk({ total: 100 * MiB, free: 10 * MiB + 256 * 1024 })
-    const proxy = new FSProxy({ dir: tmp.path })
+    const spool = new Spool({ dir: tmp.path })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(randomBytes(2 * MiB)), proxy, out.stream)
-    await until(() => fileSize(proxy) === 256 * 1024)
+    const done = pipeline(source(randomBytes(2 * MiB)), spool, out.stream)
+    await until(() => fileSize(spool) === 256 * 1024)
     await sleep(50)
-    expect(fileSize(proxy)).toBe(256 * 1024)
+    expect(fileSize(spool)).toBe(256 * 1024)
 
     out.resume()
     await done
@@ -165,17 +165,17 @@ describe('minFreeSpace', () => {
   it('resumes spilling when free space recovers', async () => {
     const disk = fakeDisk({ total: 100 * MiB, free: 5 * MiB })
     const data = randomBytes(2 * MiB)
-    const proxy = new FSProxy({ dir: tmp.path, minFreeSpace: '10%' })
+    const spool = new Spool({ dir: tmp.path, minFreeSpace: '10%' })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(data), proxy, out.stream)
+    const done = pipeline(source(data), spool, out.stream)
     await sleep(100)
-    expect(proxy.filepath).toBeNull()
+    expect(spool.filepath).toBeNull()
 
     disk.free = 50 * MiB
-    await until(() => proxy.writableFinished)
-    expect(fileSize(proxy)).toBeGreaterThan(MiB)
+    await until(() => spool.writableFinished)
+    expect(fileSize(spool)).toBeGreaterThan(MiB)
 
     out.resume()
     await done
@@ -185,54 +185,54 @@ describe('minFreeSpace', () => {
   it('still delivers data when the disk is already below the floor', async () => {
     fakeDisk({ total: 100 * MiB, free: MiB })
     const data = randomBytes(2 * MiB)
-    const proxy = new FSProxy({ dir: tmp.path })
+    const spool = new Spool({ dir: tmp.path })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(data), proxy, out.stream)
+    const done = pipeline(source(data), spool, out.stream)
     await sleep(100)
     out.resume()
     await done
 
-    expect(proxy.filepath).toBeNull()
+    expect(spool.filepath).toBeNull()
     expect(out.received.equals(data)).toBe(true)
   })
 
-  it("fails with FSProxyLimitError when onLimit is 'error'", async () => {
+  it("fails with SpoolLimitError when onLimit is 'error'", async () => {
     fakeDisk({ total: 100 * MiB, free: MiB })
-    const proxy = new FSProxy({ dir: tmp.path, onLimit: 'error' })
+    const spool = new Spool({ dir: tmp.path, onLimit: 'error' })
     const out = sink()
     out.pause()
 
-    const error = await pipeline(source(randomBytes(MiB)), proxy, out.stream).catch((e) => e)
-    expect(error).toBeInstanceOf(FSProxyLimitError)
+    const error = await pipeline(source(randomBytes(MiB)), spool, out.stream).catch((e) => e)
+    expect(error).toBeInstanceOf(SpoolLimitError)
     expect(error.message).toMatch(/minFreeSpace/)
   })
 
   it('is ignored when set to false', async () => {
     fakeDisk({ total: 100 * MiB, free: 0 })
-    const proxy = new FSProxy({ dir: tmp.path, minFreeSpace: false })
+    const spool = new Spool({ dir: tmp.path, minFreeSpace: false })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(randomBytes(MiB)), proxy, out.stream)
+    const done = pipeline(source(randomBytes(MiB)), spool, out.stream)
     // No floor applies, so the whole source is accepted while the consumer is stalled.
-    await until(() => proxy.writableFinished)
-    expect(fileSize(proxy)).toBeGreaterThan(0)
+    await until(() => spool.writableFinished)
+    expect(fileSize(spool)).toBeGreaterThan(0)
     out.resume()
     await done
   })
 
   it("is ignored when free space can't be read", async () => {
     vi.mocked(statfs).mockRejectedValue(Object.assign(new Error('nope'), { code: 'ENOSYS' }))
-    const proxy = new FSProxy({ dir: tmp.path })
+    const spool = new Spool({ dir: tmp.path })
     const out = sink()
     out.pause()
 
-    const done = pipeline(source(randomBytes(MiB)), proxy, out.stream)
+    const done = pipeline(source(randomBytes(MiB)), spool, out.stream)
     // No floor applies, so the whole source is accepted while the consumer is stalled.
-    await until(() => proxy.writableFinished)
-    expect(fileSize(proxy)).toBeGreaterThan(0)
+    await until(() => spool.writableFinished)
+    expect(fileSize(spool)).toBeGreaterThan(0)
     out.resume()
     await done
   })
@@ -249,9 +249,9 @@ describe('memory-backed filesystems', () => {
       for (let i = 0; i < 2; i++) {
         const out = sink()
         out.pause()
-        const proxy = new FSProxy({ dir: tmp.path })
-        const done = pipeline(source(randomBytes(256 * 1024)), proxy, out.stream)
-        await until(() => proxy.writableFinished)
+        const spool = new Spool({ dir: tmp.path })
+        const done = pipeline(source(randomBytes(256 * 1024)), spool, out.stream)
+        await until(() => spool.writableFinished)
         out.resume()
         await done
       }
@@ -261,7 +261,7 @@ describe('memory-backed filesystems', () => {
     }
 
     expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toMatchObject({ code: 'STREAM_FS_PROXY_TMPFS' })
+    expect(warnings[0]).toMatchObject({ code: 'SYKE_SPOOL_TMPFS' })
   })
 })
 
@@ -275,12 +275,12 @@ describe('option validation', () => {
     { maxDiskBytes: Number.POSITIVE_INFINITY },
     { onLimit: 'drop' as never },
   ])('rejects %o', (options) => {
-    expect(() => new FSProxy(options)).toThrow(RangeError)
+    expect(() => new Spool(options)).toThrow(RangeError)
   })
 
   it('accepts an empty stream with limits set', async () => {
     const out = sink()
-    await pipeline(Readable.from([]), new FSProxy({ maxDiskBytes: 1 }), out.stream)
+    await pipeline(Readable.from([]), new Spool({ maxDiskBytes: 1 }), out.stream)
     expect(out.received.length).toBe(0)
   })
 })

@@ -1,6 +1,6 @@
 import { statfs } from 'node:fs/promises'
 
-/** Free space to leave on the cache file's filesystem: a percentage, bytes, or `false` for no floor. */
+/** Free space to leave on the spool file's filesystem: a percentage, bytes, or `false` for no floor. */
 export type MinFreeSpace = `${number}%` | number | false
 
 export type FreeSpaceFloor = { percent: number } | { bytes: number } | null
@@ -11,7 +11,7 @@ export function parseMinFreeSpace(value: MinFreeSpace): FreeSpaceFloor {
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || value < 0) {
       throw new RangeError(
-        `stream-fs-proxy: minFreeSpace must be a non-negative integer of bytes, a percentage like '10%', or false, got ${value}`,
+        `syke: minFreeSpace must be a non-negative integer of bytes, a percentage like '10%', or false, got ${value}`,
       )
     }
     return { bytes: value }
@@ -21,7 +21,7 @@ export function parseMinFreeSpace(value: MinFreeSpace): FreeSpaceFloor {
   const percent = match ? Number(match[1]) : Number.NaN
   if (!(percent >= 0 && percent <= 100)) {
     throw new RangeError(
-      `stream-fs-proxy: minFreeSpace must be a percentage between '0%' and '100%', got '${value}'`,
+      `syke: minFreeSpace must be a percentage between '0%' and '100%', got '${value}'`,
     )
   }
   return { percent }
@@ -57,7 +57,7 @@ export async function warnIfMemoryBacked(dir: string): Promise<void> {
   }
   warnedDirs.add(dir)
   process.emitWarning(
-    `${dir} is a memory-backed filesystem, so data stream-fs-proxy spills there still uses RAM. Pass a 'dir' on a real disk to keep memory bounded.`,
-    { code: 'STREAM_FS_PROXY_TMPFS' },
+    `${dir} is a memory-backed filesystem, so data a Spool spills there still uses RAM. Pass a 'dir' on a real disk to keep memory bounded.`,
+    { code: 'SYKE_SPOOL_TMPFS' },
   )
 }
