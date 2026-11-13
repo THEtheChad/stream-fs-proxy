@@ -1,0 +1,2 @@
+# Only install versions that have been public for at least two weeks.
+minimumReleaseAge: 20160
