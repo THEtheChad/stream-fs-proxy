@@ -30,12 +30,13 @@
   high-water-mark options from `stream.Duplex`.
 - Disk limits: `minFreeSpace` (default `'10%'`, checked against the filesystem's
   live free space), `maxDiskBytes`, and `onLimit` (`'backpressure'` or `'error'`,
-  which throws `FSProxyLimitError`). At a limit the cache file works as a ring
-  buffer.
+  which throws `FSProxyLimitError`).
 - A one-time process warning when the cache directory is tmpfs or ramfs.
 - Chunks pass straight through without touching disk when the consumer is keeping up.
-- The cache file is created only when the stream first spills, and its space is
-  reused once the backlog drains.
+- The cache file is created only when the stream first spills, and space the
+  consumer has read is reused before the file grows, so disk use tracks the
+  backlog rather than the whole stream.
+- The cache file is deleted if the process exits mid-stream.
 - ESM and CommonJS builds with TypeScript types.
 
 ## 1.0.5

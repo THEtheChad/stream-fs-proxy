@@ -14,9 +14,10 @@ Reach for it when:
 
 Memory stays bounded by the stream's high-water mark plus `chunkSize` (and
 `memoryThreshold`, if you set one), however far the consumer falls behind. Disk
-usage grows only as large as the biggest backlog: once the consumer catches up,
-the cache file is reused from the start. By default it also stops spilling before
-the disk drops below 10% free (see [Disk limits](#disk-limits)).
+usage tracks the backlog, not the stream: space the consumer has already read is
+reused before the cache file grows. By default it also stops spilling before the
+disk drops below 10% free (see [Disk limits](#disk-limits)), and the file is
+removed even if the process exits mid-stream.
 
 ## Install
 
@@ -78,9 +79,9 @@ Two limits keep the cache file from filling the disk:
   space can't be read on a platform, the floor isn't enforced.
 - **`maxDiskBytes`** caps the size of one stream's cache file.
 
-When either limit is reached, the cache file becomes a ring buffer: new data
-wraps into space the consumer has already read, so the source resumes as soon as
-the consumer frees some room rather than after the whole backlog drains.
+At a limit, new data goes into any space the consumer has already read, so the
+source resumes as soon as the consumer frees some room rather than after the
+whole backlog drains.
 
 If there's no room at all, `onLimit` decides:
 
@@ -103,6 +104,26 @@ disk" there still uses memory. The first time a proxy spills into a tmpfs or
 ramfs directory, it emits a process warning (`code: 'STREAM_FS_PROXY_TMPFS'`).
 Pass a `dir` on a real disk to fix it.
 
+## Cleanup on exit
+
+The cache file is deleted when the stream ends, errors or is destroyed, and also
+if the process exits mid-stream (`process.exit()` or the event loop emptying),
+through a single shared `exit` listener.
+
+Node doesn't emit `exit` when the process is killed by a signal it doesn't
+handle, such as `SIGINT` or `SIGTERM`. If your app doesn't already handle those,
+add a handler that exits normally so the cleanup runs:
+
+```js
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.once(signal, () => process.exit(1))
+}
+```
+
+The library doesn't install signal handlers itself, since that would change how
+your app shuts down. Nothing can clean up after `SIGKILL` or a crash of the OS;
+files left that way are named `stream-fs-proxy-*` in the cache directory.
+
 ## How it works
 
 - If the consumer is waiting and nothing is queued, a chunk is handed straight
@@ -111,16 +132,20 @@ Pass a `dir` on a real disk to fix it.
   cache file. Order is always preserved.
 - The cache file is created lazily with mode `0600`, so a stream that never falls
   behind never creates one.
-- At a disk limit, writes wrap to the front of the file (a ring buffer), and the
-  source only waits when the file is truly full.
-- The file is closed and deleted when the stream ends, errors or is destroyed.
+- The file holds unread data as a short list of regions. Reads take from the
+  oldest region; writes extend the newest one or start a new region in space the
+  consumer has already read (at least `chunkSize` bytes of it), and the file only
+  grows when no such space exists.
+- The file is closed and deleted when the stream ends, errors, is destroyed or
+  the process exits.
 
 ## Prior art
 
 [`fs-capacitor`](https://github.com/mike-marcacci/fs-capacitor) also buffers to a
 temporary file, and supports multiple readers of the same buffered data. Use it if
-you need to replay the stream; use `stream-fs-proxy` for a single pass-through
-with bounded memory and file reuse.
+you need to replay the stream. `stream-fs-proxy` is a single pass-through: it
+skips the disk while the consumer keeps up, reuses space as data is read, and can
+cap disk use, but it can't replay data that's already been read.
 
 ## License
 
