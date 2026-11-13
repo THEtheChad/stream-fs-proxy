@@ -1,0 +1,137 @@
+{
+ "env": {
+  "User agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+  "Secure context": "true",
+  "Storage quota": "10.0 GB (using 0.0 MB)",
+  "Storage persisted": "false",
+  "OPFS sync handle in worker": "true",
+  "OPFS createWritable on main thread": "true",
+  "Web Locks": "true"
+ },
+ "checks": [
+  {
+   "name": "Read while writing: IndexedDB (relaxed durability)",
+   "ok": true,
+   "detail": "1618 records written, 131.7 MB read back in order"
+  },
+  {
+   "name": "Read while writing: IndexedDB (default durability)",
+   "ok": true,
+   "detail": "1628 records written, 130.5 MB read back in order"
+  },
+  {
+   "name": "Read while writing: OPFS sync handle in a worker",
+   "ok": true,
+   "detail": "1648 records written, 154.7 MB read back in order"
+  },
+  {
+   "name": "Sweep leaves a live tab\u2019s spool alone",
+   "ok": true,
+   "detail": "kept: 1, removed: 0"
+  },
+  {
+   "name": "Sweep removes a closed tab\u2019s spool",
+   "ok": true,
+   "detail": "records left: 0, file left: false"
+  }
+ ],
+ "results": [
+  {
+   "backend": "IndexedDB (relaxed durability)",
+   "batch": 65536,
+   "writeMBps": 117.9941002936886,
+   "drainMBps": 104.23452764682175,
+   "stallMs": 7.9000000059604645,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (relaxed durability)",
+   "batch": 262144,
+   "writeMBps": 209.42408375329495,
+   "drainMBps": 138.88888883139984,
+   "stallMs": 6,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (relaxed durability)",
+   "batch": 1048576,
+   "writeMBps": 195.30057978793943,
+   "drainMBps": 193.29507700208845,
+   "stallMs": 7.5999999940395355,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (relaxed durability)",
+   "batch": 4194304,
+   "writeMBps": 168.2881935525233,
+   "drainMBps": 160.44121332229173,
+   "stallMs": 4.699999988079071,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (default durability)",
+   "batch": 65536,
+   "writeMBps": 102.48198559336141,
+   "drainMBps": 93.82788446703809,
+   "stallMs": 16.19999998807907,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (default durability)",
+   "batch": 262144,
+   "writeMBps": 182.59629099731302,
+   "drainMBps": 191.3303437114785,
+   "stallMs": 7,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (default durability)",
+   "batch": 1048576,
+   "writeMBps": 186.8613138848727,
+   "drainMBps": 158.6121436368201,
+   "stallMs": 7.799999982118607,
+   "intact": true
+  },
+  {
+   "backend": "IndexedDB (default durability)",
+   "batch": 4194304,
+   "writeMBps": 240.69198946433005,
+   "drainMBps": 184.38490350502482,
+   "stallMs": 3.4000000059604645,
+   "intact": true
+  },
+  {
+   "backend": "OPFS sync handle in a worker",
+   "batch": 65536,
+   "writeMBps": 654.3967279365949,
+   "drainMBps": 1240.3100826771642,
+   "stallMs": 1.300000011920929,
+   "intact": true
+  },
+  {
+   "backend": "OPFS sync handle in a worker",
+   "batch": 262144,
+   "writeMBps": 1341.7190770651614,
+   "drainMBps": 2633.74486759548,
+   "stallMs": 1,
+   "intact": true
+  },
+  {
+   "backend": "OPFS sync handle in a worker",
+   "batch": 1048576,
+   "writeMBps": 2352.941174923755,
+   "drainMBps": 3809.523813578547,
+   "stallMs": 0.30000001192092896,
+   "intact": true
+  },
+  {
+   "backend": "OPFS sync handle in a worker",
+   "batch": 4194304,
+   "writeMBps": 2293.906811996093,
+   "drainMBps": 4353.741491302655,
+   "stallMs": 1.699999988079071,
+   "intact": true
+  }
+ ],
+ "error": null
+}
