@@ -28,6 +28,11 @@
 
 - Options: `dir`, `chunkSize`, `memoryThreshold`, and the `signal` and
   high-water-mark options from `stream.Duplex`.
+- Disk limits: `minFreeSpace` (default `'10%'`, checked against the filesystem's
+  live free space), `maxDiskBytes`, and `onLimit` (`'backpressure'` or `'error'`,
+  which throws `FSProxyLimitError`). At a limit the cache file works as a ring
+  buffer.
+- A one-time process warning when the cache directory is tmpfs or ramfs.
 - Chunks pass straight through without touching disk when the consumer is keeping up.
 - The cache file is created only when the stream first spills, and its space is
   reused once the backlog drains.

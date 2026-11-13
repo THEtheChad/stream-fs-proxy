@@ -1,6 +1,6 @@
 # stream-fs-proxy
 
-A pass-through stream that never applies backpressure to its source. Whatever the
+A pass-through stream that doesn't apply backpressure to its source. Whatever the
 consumer isn't ready for is spilled to a temporary file and read back, a bounded
 chunk at a time, as the consumer catches up.
 
@@ -15,7 +15,8 @@ Reach for it when:
 Memory stays bounded by the stream's high-water mark plus `chunkSize` (and
 `memoryThreshold`, if you set one), however far the consumer falls behind. Disk
 usage grows only as large as the biggest backlog: once the consumer catches up,
-the cache file is reused from the start.
+the cache file is reused from the start. By default it also stops spilling before
+the disk drops below 10% free (see [Disk limits](#disk-limits)).
 
 ## Install
 
@@ -55,6 +56,9 @@ the chain destroys every stream and the temporary file is removed.
 | `dir`                   | `os.tmpdir()`               | Directory for the cache file.                                                                                |
 | `chunkSize`             | readable high-water mark    | Largest chunk, in bytes, read back from disk and pushed downstream.                                          |
 | `memoryThreshold`       | `0`                         | Bytes to hold in memory before spilling to disk. Small bursts under this size never touch disk.             |
+| `minFreeSpace`          | `'10%'`                     | Free space to leave on `dir`'s filesystem: a percentage (`'10%'`), bytes, or `false` for no floor.           |
+| `maxDiskBytes`          | no cap                      | Largest size the cache file may reach, in bytes.                                                             |
+| `onLimit`               | `'backpressure'`            | What happens at a disk limit: `'backpressure'` pauses the source, `'error'` fails the stream.               |
 | `highWaterMark`, `readableHighWaterMark`, `writableHighWaterMark`, `signal` | Node defaults | Passed through to `stream.Duplex`. Aborting `signal` destroys the stream and removes the file. |
 
 The stream is byte-oriented: strings are written as UTF-8 buffers, and object
@@ -62,6 +66,42 @@ mode isn't supported.
 
 `proxy.filepath` holds the cache file's path once the stream first spills to disk
 (it's `null` until then).
+
+## Disk limits
+
+Two limits keep the cache file from filling the disk:
+
+- **`minFreeSpace`** (default `'10%'`) checks the filesystem's real free space
+  whenever the cache file is about to grow, and won't grow it past the floor.
+  Because it reads live free space, every stream (and every other process) shares
+  the same floor, so many parallel proxies can't oversubscribe the disk. If free
+  space can't be read on a platform, the floor isn't enforced.
+- **`maxDiskBytes`** caps the size of one stream's cache file.
+
+When either limit is reached, the cache file becomes a ring buffer: new data
+wraps into space the consumer has already read, so the source resumes as soon as
+the consumer frees some room rather than after the whole backlog drains.
+
+If there's no room at all, `onLimit` decides:
+
+- `'backpressure'` (default): the source is paused, as with an ordinary stream,
+  until the consumer frees space or free space recovers. Data is never dropped.
+- `'error'`: the stream fails with an `FSProxyLimitError`
+  (`code: 'ERR_STREAM_FS_PROXY_LIMIT'`), for when a stalled source is worse than
+  a failed one.
+
+```js
+import { FSProxy, FSProxyLimitError } from 'stream-fs-proxy'
+
+new FSProxy({ maxDiskBytes: 2 * 1024 ** 3, minFreeSpace: '20%', onLimit: 'error' })
+```
+
+### Memory-backed temp directories
+
+On some Linux systems `/tmp` is a `tmpfs`, which lives in RAM, so "spilling to
+disk" there still uses memory. The first time a proxy spills into a tmpfs or
+ramfs directory, it emits a process warning (`code: 'STREAM_FS_PROXY_TMPFS'`).
+Pass a `dir` on a real disk to fix it.
 
 ## How it works
 
@@ -71,6 +111,8 @@ mode isn't supported.
   cache file. Order is always preserved.
 - The cache file is created lazily with mode `0600`, so a stream that never falls
   behind never creates one.
+- At a disk limit, writes wrap to the front of the file (a ring buffer), and the
+  source only waits when the file is truly full.
 - The file is closed and deleted when the stream ends, errors or is destroyed.
 
 ## Prior art
