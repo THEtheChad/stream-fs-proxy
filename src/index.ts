@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { type FileHandle, open, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Duplex, type DuplexOptions } from 'node:stream'
+import { Duplex, type DuplexOptions, pipeline, Readable } from 'node:stream'
+import type { ReadableStream } from 'node:stream/web'
 import {
   type FreeSpaceFloor,
   type MinFreeSpace,
@@ -48,6 +49,13 @@ export interface FSProxyOptions
 }
 
 /** The stream hit `maxDiskBytes` or `minFreeSpace` with `onLimit: 'error'`. */
+/** Anything `FSProxy.from()` can read from. */
+export type FSProxySource =
+  | NodeJS.ReadableStream
+  | ReadableStream
+  | Iterable<Buffer | Uint8Array | string>
+  | AsyncIterable<Buffer | Uint8Array | string>
+
 export class FSProxyLimitError extends Error {
   readonly code: 'ERR_STREAM_FS_PROXY_LIMIT' = 'ERR_STREAM_FS_PROXY_LIMIT'
   override name = 'FSProxyLimitError'
@@ -102,6 +110,23 @@ export class FSProxy extends Duplex {
   #wantsData = false
   #writeEnded = false
   #readEnded = false
+
+  /**
+   * Reads `source` through a new FSProxy, so the source is never held back by
+   * a slow consumer: `FSProxy.from(res).pipe(slowWriter)`. Accepts a Node
+   * readable, a web `ReadableStream`, or an iterable or async iterable of
+   * chunks. Errors and destruction propagate both ways, as with `pipeline`.
+   *
+   * Overrides the inherited `Duplex.from()`, which would return a plain
+   * `Duplex` with no disk spilling.
+   */
+  static override from(source: FSProxySource, options?: FSProxyOptions): FSProxy {
+    const proxy = new FSProxy(options)
+    // Errors surface on `proxy` itself; the callback only stops pipeline from
+    // reporting them a second time.
+    pipeline(toNodeReadable(source), proxy, () => {})
+    return proxy
+  }
 
   constructor({
     dir,
@@ -379,6 +404,16 @@ export class FSProxy extends Duplex {
     if (opened[0].status === 'fulfilled') await opened[0].value.close()
     await rm(filepath, { force: true })
   }
+}
+
+function toNodeReadable(source: FSProxySource): NodeJS.ReadableStream {
+  if (typeof (source as NodeJS.ReadableStream).pipe === 'function') {
+    return source as NodeJS.ReadableStream
+  }
+  if (typeof (source as ReadableStream).getReader === 'function') {
+    return Readable.fromWeb(source as ReadableStream)
+  }
+  return Readable.from(source as Iterable<unknown> | AsyncIterable<unknown>, { objectMode: false })
 }
 
 function positiveInt(name: string, value: number) {

@@ -48,6 +48,27 @@ const { FSProxy } = require('stream-fs-proxy')
 Use `pipeline` rather than chained `.pipe()` calls so that an error anywhere in
 the chain destroys every stream and the temporary file is removed.
 
+### `FSProxy.from()` and `FSProxy.toWeb()`
+
+Following Node's `Readable.from()` convention, `FSProxy.from(source, options?)`
+reads a source through a new proxy. It accepts a Node readable, a web
+`ReadableStream` (such as `fetch().body`), or an iterable or async iterable of
+chunks. Errors and destruction propagate both ways, as with `pipeline`.
+
+```js
+const res = await fetch('https://example.com/large-dataset.ndjson')
+FSProxy.from(res.body).pipe(slowDatabaseWriter)
+```
+
+`FSProxy.toWeb(proxy)` (inherited from `Duplex`) turns a proxy into a
+`{ readable, writable }` pair for Web Streams code:
+
+```js
+await res.body
+  .pipeThrough(FSProxy.toWeb(new FSProxy()))
+  .pipeTo(slowWebWritable)
+```
+
 ## Options
 
 `new FSProxy(options?)`

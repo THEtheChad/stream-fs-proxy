@@ -37,6 +37,9 @@
   consumer has read is reused before the file grows, so disk use tracks the
   backlog rather than the whole stream.
 - The cache file is deleted if the process exits mid-stream.
+- `FSProxy.from(source, options)` reads a Node readable, web `ReadableStream` or
+  (async) iterable through a new proxy. It overrides the inherited
+  `Duplex.from()`, which returned a plain `Duplex` with no disk spilling.
 - ESM and CommonJS builds with TypeScript types.
 
 ## 1.0.5
