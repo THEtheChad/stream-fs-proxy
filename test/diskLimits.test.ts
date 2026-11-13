@@ -216,7 +216,9 @@ describe('minFreeSpace', () => {
     out.pause()
 
     const done = pipeline(source(randomBytes(MiB)), proxy, out.stream)
-    await until(() => fileSize(proxy) === MiB)
+    // No floor applies, so the whole source is accepted while the consumer is stalled.
+    await until(() => proxy.writableFinished)
+    expect(fileSize(proxy)).toBeGreaterThan(0)
     out.resume()
     await done
   })
@@ -228,7 +230,9 @@ describe('minFreeSpace', () => {
     out.pause()
 
     const done = pipeline(source(randomBytes(MiB)), proxy, out.stream)
-    await until(() => fileSize(proxy) === MiB)
+    // No floor applies, so the whole source is accepted while the consumer is stalled.
+    await until(() => proxy.writableFinished)
+    expect(fileSize(proxy)).toBeGreaterThan(0)
     out.resume()
     await done
   })

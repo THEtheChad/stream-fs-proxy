@@ -53,8 +53,14 @@ export class FSProxyLimitError extends Error {
   override name = 'FSProxyLimitError'
 }
 
+/** A run of unread bytes in the cache file: [start, end). */
+interface Extent {
+  start: number
+  end: number
+}
+
+/** Where the next write goes. */
 interface WriteTarget {
-  region: 'head' | 'wrap'
   position: number
   length: number
 }
@@ -81,12 +87,10 @@ export class FSProxy extends Duplex {
 
   #file: Promise<FileHandle> | null = null
   #fileSize = 0
-  // The cache file is a ring buffer. Unread bytes are [headStart, headEnd),
-  // followed by [0, wrapEnd) once writing has wrapped to the front of the file.
-  #headStart = 0
-  #headEnd = 0
-  #wrapEnd = 0
-  #wrapped = false
+  // Unread bytes in stream order. Reads take from the first extent; writes
+  // extend the last one or start a new one in free space, so space the reader
+  // has finished with is reused before the file grows.
+  #extents: Extent[] = []
   #reading = false
   #writing = false
   #wakeWriter: (() => void) | null = null
@@ -177,7 +181,7 @@ export class FSProxy extends Duplex {
 
   /** No unread bytes on disk and no write in flight. */
   #diskEmpty() {
-    return this.#headStart === this.#headEnd && this.#wrapEnd === 0 && !this.#writing
+    return this.#extents.length === 0 && !this.#writing
   }
 
   async #spill(chunk: Buffer) {
@@ -185,11 +189,17 @@ export class FSProxy extends Duplex {
     while (rest.length > 0) {
       if (this.destroyed) return
 
-      const budget = await this.#growthBudget(rest.length)
-      // Everything from here to `#writing = true` is synchronous, so the
-      // target can't go stale before the write starts.
-      this.#compact()
-      const target = this.#target(rest.length, budget)
+      // Prefer space inside the file; only ask the filesystem when it must grow.
+      let budget = 0
+      let target = this.#place(rest.length, 0, false)
+      if (!target && this.#fileSize < this.#maxDiskBytes) {
+        budget = this.#floor ? await freeSpaceBudget(this.#dir, this.#floor) : Number.POSITIVE_INFINITY
+        // State may have changed during the await, so place again from scratch.
+        // Everything from here to `#writing = true` is synchronous.
+        target = this.#place(rest.length, budget, false)
+      }
+      // At a limit, any free gap will do, however small.
+      target ??= this.#place(rest.length, budget, true)
 
       if (!target) {
         // At a limit with nothing queued and the consumer waiting: hand it over.
@@ -217,49 +227,51 @@ export class FSProxy extends Duplex {
         this.#writing = false
       }
 
-      if (target.region === 'head') {
-        this.#headEnd += piece.length
-        this.#fileSize = Math.max(this.#fileSize, this.#headEnd)
-      } else {
-        this.#wrapEnd += piece.length
-      }
+      const end = target.position + piece.length
+      const tail = this.#extents.at(-1)
+      // The tail may have been fully read (and dropped) during the write.
+      if (tail && tail.end === target.position) tail.end = end
+      else this.#extents.push({ start: target.position, end })
+      this.#fileSize = Math.max(this.#fileSize, end)
       rest = rest.subarray(piece.length)
       this.#flush()
     }
   }
 
-  /** Bytes the file may grow by under `minFreeSpace`; only checked when it would grow. */
-  #growthBudget(want: number) {
-    const grows = !this.#wrapped && this.#headEnd + want > this.#fileSize
-    if (!grows || !this.#floor) return Promise.resolve(Number.POSITIVE_INFINITY)
-    return freeSpaceBudget(this.#dir, this.#floor)
+  /**
+   * Finds space for up to `want` bytes: right after the last extent if
+   * possible, otherwise the first free gap. The file may grow by `growth`
+   * bytes (capped by `maxDiskBytes`). Unless `anySize`, gaps smaller than
+   * `chunkSize` are skipped to avoid fragmenting the file.
+   */
+  #place(want: number, growth: number, anySize: boolean): WriteTarget | null {
+    const limit = Math.min(this.#maxDiskBytes, this.#fileSize + Math.max(0, growth))
+    const tail = this.#extents.at(-1)
+    const minGap = anySize ? 1 : Math.min(want, this.#chunkSize)
+
+    let first: WriteTarget | null = null
+    for (const gap of this.#gaps(limit)) {
+      const length = Math.min(want, gap.end - gap.start)
+      if (tail && gap.start === tail.end) return { position: gap.start, length }
+      if (!first && gap.end - gap.start >= minGap) first = { position: gap.start, length }
+    }
+    return first
   }
 
-  /** Where the next write of up to `want` bytes goes, or `null` if no space. */
-  #target(want: number, budget: number): WriteTarget | null {
-    if (this.#wrapped) {
-      const room = this.#headStart - this.#wrapEnd
-      if (room <= 0) return null
-      return { region: 'wrap', position: this.#wrapEnd, length: Math.min(want, room) }
+  /** Free space in [0, limit), in file order. */
+  #gaps(limit: number) {
+    const gaps: Extent[] = []
+    let cursor = 0
+    for (const extent of [...this.#extents].sort((a, b) => a.start - b.start)) {
+      if (extent.start > cursor) gaps.push({ start: cursor, end: Math.min(extent.start, limit) })
+      cursor = Math.max(cursor, extent.end)
     }
-
-    const end = Math.min(this.#maxDiskBytes, this.#fileSize + Math.max(0, budget))
-    const room = end - this.#headEnd
-    if (room > 0) {
-      return { region: 'head', position: this.#headEnd, length: Math.min(want, room) }
-    }
-
-    // Out of room at the end of the file: wrap into space the reader has freed.
-    if (this.#headStart > 0) {
-      this.#wrapped = true
-      this.#wrapEnd = 0
-      return { region: 'wrap', position: 0, length: Math.min(want, this.#headStart) }
-    }
-    return null
+    if (limit > cursor) gaps.push({ start: cursor, end: limit })
+    return gaps.filter((gap) => gap.end > gap.start)
   }
 
   #limitMessage(budget: number) {
-    if (this.#maxDiskBytes <= this.#fileSize + Math.max(0, budget)) {
+    if (this.#fileSize + Math.max(0, budget) >= this.#maxDiskBytes) {
       return `stream-fs-proxy: cache file reached maxDiskBytes (${this.#maxDiskBytes} bytes)`
     }
     return `stream-fs-proxy: spilling more would take free space on ${this.#dir} below minFreeSpace`
@@ -276,15 +288,6 @@ export class FSProxy extends Duplex {
       const timer = setTimeout(wake, FREE_SPACE_POLL_MS)
       this.#wakeWriter = wake
     })
-  }
-
-  /** Once the head region is fully read, move the wrapped region (or the empty file) to the front. */
-  #compact() {
-    if (this.#reading || this.#writing || this.#headStart !== this.#headEnd) return
-    this.#headStart = 0
-    this.#headEnd = this.#wrapped ? this.#wrapEnd : 0
-    this.#wrapEnd = 0
-    this.#wrapped = false
   }
 
   #openFile() {
@@ -304,7 +307,6 @@ export class FSProxy extends Duplex {
 
   #flush() {
     if (this.#readEnded || this.destroyed) return
-    this.#compact()
     this.#wakeWriter?.()
     if (this.#reading) return
 
@@ -316,7 +318,7 @@ export class FSProxy extends Duplex {
 
     if (this.#memory.length > 0) return
 
-    if (this.#headEnd > this.#headStart) {
+    if (this.#extents.length > 0) {
       if (this.#wantsData) this.#readFromDisk()
       return
     }
@@ -329,8 +331,9 @@ export class FSProxy extends Duplex {
 
   #readFromDisk() {
     this.#reading = true
-    const length = Math.min(this.#chunkSize, this.#headEnd - this.#headStart)
-    const position = this.#headStart
+    const head = this.#extents[0] as Extent
+    const length = Math.min(this.#chunkSize, head.end - head.start)
+    const position = head.start
     const read = this.#track(
       this.#openFile().then((file) => file.read(Buffer.allocUnsafe(length), 0, length, position)),
     )
@@ -344,7 +347,8 @@ export class FSProxy extends Duplex {
           return
         }
 
-        this.#headStart += bytesRead
+        head.start += bytesRead
+        if (head.start === head.end) this.#extents.shift()
         this.#wantsData = this.push(bytesRead < length ? buffer.subarray(0, bytesRead) : buffer)
         this.#flush()
       },

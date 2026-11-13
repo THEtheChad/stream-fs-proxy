@@ -8,7 +8,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { describe, expect, it } from 'vitest'
 import { FSProxy } from '../src/index.ts'
-import { closed, sink, source, useTempDir } from './helpers.ts'
+import { closed, sink, source, until, useTempDir, watchFileSize } from './helpers.ts'
 
 const tmp = useTempDir()
 
@@ -172,6 +172,44 @@ describe('FSProxy', () => {
 
     expect(out.received.equals(data)).toBe(true)
     expect(peakFileSize).toBeLessThanOrEqual(backlog)
+  })
+
+  it('reuses space the consumer has read even when the backlog never drains', async () => {
+    const MiB = 1024 * 1024
+    const data = randomBytes(8 * MiB)
+    const proxy = new FSProxy({ dir: tmp.path })
+    const src = new Readable({ read() {} })
+    const out = sink()
+    out.pause()
+    const done = pipeline(src, proxy, out.stream)
+    const size = watchFileSize(proxy)
+
+    let pushed = 0
+    let received = 0
+    proxy.on('data', (chunk: Buffer) => {
+      received += chunk.length
+    })
+    const pushMiB = async () => {
+      src.push(data.subarray(pushed, pushed + MiB))
+      pushed += MiB
+      await until(() => src.readableLength === 0 && proxy.writableLength === 0)
+    }
+
+    // Keep 1–2 MiB queued the whole time: the consumer reads some, never all.
+    await pushMiB()
+    while (pushed < data.length) {
+      await pushMiB()
+      out.resume()
+      await until(() => received >= pushed - 1.25 * MiB)
+      out.pause()
+    }
+    src.push(null)
+    out.resume()
+    await done
+
+    expect(out.received.equals(data)).toBe(true)
+    // Reusing space only after a full drain would grow the file to all 8 MiB.
+    expect(size.stop()).toBeLessThan(4 * MiB)
   })
 
   it('removes the cache file if the process exits mid-stream', () => {
