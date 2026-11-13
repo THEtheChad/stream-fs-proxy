@@ -538,5 +538,24 @@
       window.__proto.wiped = true
     })
 
-  showEnvironment().catch((e) => log('environment check failed: ' + e))
+  const envReady = showEnvironment().catch((e) => log('environment check failed: ' + e))
+
+  // `?auto`: run every check and the benchmark, wipe, then POST the results to
+  // serve.mjs, so browsers that can't be scripted directly can still be measured.
+  if (new URLSearchParams(location.search).has('auto')) {
+    ;(async () => {
+      await envReady
+      for (const id of ['interleave', 'cleanup', 'bench', 'wipe']) {
+        $(id).click()
+        await new Promise((r) => setTimeout(r, 50))
+        while (window.__proto.running) await new Promise((r) => setTimeout(r, 100))
+      }
+      const { env, checks, results, error } = window.__proto
+      await fetch('/results', {
+        method: 'POST',
+        body: JSON.stringify({ env, checks, results, error: error ?? null, log: $('log').textContent }),
+      })
+      log('results posted')
+    })()
+  }
 </script>
