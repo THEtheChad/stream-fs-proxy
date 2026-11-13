@@ -1,7 +1,9 @@
+import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { describe, expect, it } from 'vitest'
@@ -170,6 +172,37 @@ describe('FSProxy', () => {
 
     expect(out.received.equals(data)).toBe(true)
     expect(peakFileSize).toBeLessThanOrEqual(backlog)
+  })
+
+  it('removes the cache file if the process exits mid-stream', () => {
+    const entry = pathToFileURL(join(import.meta.dirname, '../src/index.ts')).href
+    const child = `
+      import { statSync } from 'node:fs'
+      import { Readable, Writable } from 'node:stream'
+      import { FSProxy } from ${JSON.stringify(entry)}
+
+      const proxy = new FSProxy({ dir: ${JSON.stringify(tmp.path)} })
+      const src = new Readable({ read() {} })
+      // A consumer that never finishes a write, so everything spills.
+      src.pipe(proxy).pipe(new Writable({ highWaterMark: 1, write() {} }))
+      src.push(Buffer.alloc(1024 * 1024))
+
+      setInterval(() => {
+        const size = proxy.filepath && statSync(proxy.filepath, { throwIfNoEntry: false })?.size
+        if (size > 0) {
+          console.log(proxy.filepath)
+          process.exit(0)
+        }
+      }, 5)
+    `
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', child], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000,
+    })
+
+    expect(output.trim()).toMatch(/stream-fs-proxy-/)
+    expect(existsSync(output.trim())).toBe(false)
   })
 
   it('creates the cache file readable only by the owner', async () => {

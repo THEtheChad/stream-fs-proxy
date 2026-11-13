@@ -10,6 +10,7 @@ import {
   parseMinFreeSpace,
   warnIfMemoryBacked,
 } from './diskSpace.ts'
+import { forgetOnExit, removeOnExit } from './exitCleanup.ts'
 
 export type { MinFreeSpace }
 
@@ -291,7 +292,12 @@ export class FSProxy extends Duplex {
       const filepath = join(this.#dir, `stream-fs-proxy-${randomUUID()}`)
       this.filepath = filepath
       // `wx+` refuses to reuse an existing file; 0o600 keeps it private.
-      this.#file = warnIfMemoryBacked(this.#dir).then(() => open(filepath, 'wx+', 0o600))
+      this.#file = warnIfMemoryBacked(this.#dir)
+        .then(() => open(filepath, 'wx+', 0o600))
+        .then((file) => {
+          removeOnExit(filepath, file.fd)
+          return file
+        })
     }
     return this.#file
   }
@@ -363,6 +369,7 @@ export class FSProxy extends Duplex {
     const filepath = this.filepath as string
     const file = this.#file
     this.#file = null
+    forgetOnExit(filepath)
 
     const opened = await Promise.allSettled([file])
     if (opened[0].status === 'fulfilled') await opened[0].value.close()
